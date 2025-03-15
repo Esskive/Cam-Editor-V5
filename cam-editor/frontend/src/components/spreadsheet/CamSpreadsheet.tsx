@@ -19,6 +19,7 @@ import { Link as LinkIcon, LinkOff as LinkOffIcon } from '@mui/icons-material';
 import Spreadsheet from 'react-spreadsheet';
 import { SpreadsheetCell, CamProfile, Segment, CellLink } from '../../types';
 import { camProfileAPI } from '../../services/api';
+import * as _ from 'lodash';
 
 interface LinkingInfo {
   active: boolean;
@@ -31,27 +32,18 @@ interface CellPosition {
   col: number;
 }
 
+interface CellChange {
+  row: number;
+  col: number;
+  value: string;
+}
+
 interface CamSpreadsheetProps {
   camProfile: CamProfile | null;
   onProfileUpdate: (updatedProfile: CamProfile) => void;
   linkingInfo?: LinkingInfo;
   onLinkComplete?: () => void;
 }
-
-// Utility function to debounce function calls
-const debounce = <F extends (...args: any[]) => any>(
-  func: F,
-  waitFor: number
-): ((...args: Parameters<F>) => void) => {
-  let timeout: ReturnType<typeof setTimeout> | null = null;
-  
-  return (...args: Parameters<F>): void => {
-    if (timeout !== null) {
-      clearTimeout(timeout);
-    }
-    timeout = setTimeout(() => func(...args), waitFor);
-  };
-};
 
 // Composant pour l'édition des cellules
 const CellEditor: React.FC<{
@@ -272,116 +264,95 @@ export const CamSpreadsheet: React.FC<CamSpreadsheetProps> = ({
 
   // Function to get the calculated value from a cell, handling formulas
   const getCalculatedCellValue = useCallback((cell: SpreadsheetCell, currentData: SpreadsheetCell[][]): number | null => {
-    if (!cell) return null;
-    
-    // Si la cellule a une valeur calculée, l'utiliser
-    if (cell.calculatedValue !== undefined) {
-      console.log(`Using calculated value: ${cell.calculatedValue}`);
-      return cell.calculatedValue;
-    }
-    
-    // Si la cellule a une formule, l'évaluer
-    if (cell.formula || (typeof cell.value === 'string' && cell.value.startsWith('='))) {
-      try {
-        // Get the formula string without the equals sign
-        const formulaStr = cell.formula || (cell.value as string).substring(1);
-        console.log(`Evaluating formula: ${formulaStr}`);
-        
-        // Si la formule est vide ou incomplète, retourner null
-        if (!formulaStr || formulaStr.length <= 1) {
-          console.log('Formula is empty or incomplete');
-          return null;
-        }
+    if (!cell || cell.value === null || cell.value === undefined) return null;
 
-        // Vérifier si la formule se termine par un opérateur
-        if (formulaStr.match(/[+\-*/]$/)) {
-          console.log('Formula ends with an operator, returning null');
-          return null;
-        }
-        
-        // Replace cell references (like A1, B2) with their values
-        const cellRefRegex = /([A-Z]+)(\d+)/g;
-        let evaluatedFormula = formulaStr;
-        let hasValidReferences = false;
-        
-        evaluatedFormula = evaluatedFormula.replace(cellRefRegex, (match, colStr, rowStr) => {
-          // Convert column letter to index (A=0, B=1, C=2, etc.)
-          let colIndex = 0;
-          for (let i = 0; i < colStr.length; i++) {
-            colIndex = colIndex * 26 + (colStr.charCodeAt(i) - 'A'.charCodeAt(0));
+    // Si c'est une valeur numérique directe
+    if (typeof cell.value === 'number') {
+      return cell.value;
+    }
+
+    // Si c'est une chaîne
+    if (typeof cell.value === 'string') {
+      // Si c'est une formule
+      if (cell.value.startsWith('=')) {
+        try {
+          const formulaStr = cell.value.substring(1);
+          
+          if (!formulaStr || formulaStr.length <= 1) {
+            return null;
           }
-          
-          // Convert row string to index (1-based to 0-based)
-          const rowIndex = parseInt(rowStr, 10) - 1;
-          
-          // Get the cell value
-          if (rowIndex >= 0 && rowIndex < currentData.length && 
-              colIndex >= 0 && colIndex < (currentData[rowIndex]?.length || 0)) {
-            const refCell = currentData[rowIndex][colIndex];
-            if (refCell) {
-              hasValidReferences = true;
-              // Si la cellule référencée a une valeur calculée, l'utiliser
-              if (refCell.calculatedValue !== undefined) {
-                return refCell.calculatedValue.toString();
-              }
+
+          if (formulaStr.match(/[+\-*/]$/)) {
+            return null;
+          }
+
+          const cellRefRegex = /([A-Z]+)(\d+)/g;
+          let evaluatedFormula = formulaStr;
+          let allReferencesValid = true;
+          const processedCells = new Set<string>();
+
+          evaluatedFormula = evaluatedFormula.replace(cellRefRegex, (match, colStr, rowStr) => {
+            // Éviter les boucles infinies en vérifiant si on a déjà traité cette cellule
+            if (processedCells.has(match)) {
+              allReferencesValid = false;
+              return '0';
+            }
+            processedCells.add(match);
+
+            let colIndex = 0;
+            for (let i = 0; i < colStr.length; i++) {
+              colIndex = colIndex * 26 + (colStr.charCodeAt(i) - 'A'.charCodeAt(0));
+            }
+
+            const rowIndex = parseInt(rowStr, 10) - 1;
+
+            if (rowIndex >= 0 && rowIndex < currentData.length &&
+                colIndex >= 0 && colIndex < (currentData[rowIndex]?.length || 0)) {
+              const refCell = currentData[rowIndex][colIndex];
               
-              // Si c'est une valeur numérique directe
-              if (typeof refCell.value === 'number') {
-                return refCell.value.toString();
-              }
-              
-              // Si c'est une chaîne qui peut être convertie en nombre
-              if (typeof refCell.value === 'string' && !refCell.value.startsWith('=')) {
-                const numValue = parseFloat(refCell.value);
-                if (!isNaN(numValue)) {
-                  return numValue.toString();
+              if (refCell) {
+                // Si la cellule référencée a une valeur calculée, l'utiliser
+                if (refCell.calculatedValue !== undefined) {
+                  return refCell.calculatedValue.toString();
+                }
+                
+                // Sinon, calculer sa valeur
+                const refValue = getCalculatedCellValue(refCell, currentData);
+                if (refValue !== null) {
+                  return refValue.toString();
                 }
               }
             }
+            
+            allReferencesValid = false;
+            return '0';
+          });
+
+          if (!allReferencesValid) {
+            console.error('Invalid cell references in formula:', formulaStr);
+            return null;
           }
-          return '0'; // Valeur par défaut si la référence n'est pas trouvée
-        });
-        
-        // Si la formule ne contient pas de références valides, retourner null
-        if (!hasValidReferences) {
-          console.log('No valid references found in formula');
+
+          if (!/^[\d\s+\-*/().]+$/.test(evaluatedFormula)) {
+            console.error('Invalid characters in formula:', evaluatedFormula);
+            return null;
+          }
+
+          console.log('Evaluating formula:', evaluatedFormula);
+          const result = new Function(`return ${evaluatedFormula}`)();
+          return typeof result === 'number' && !isNaN(result) ? result : null;
+
+        } catch (error) {
+          console.error('Error evaluating formula:', error);
           return null;
         }
-        
-        console.log(`Evaluated formula: ${evaluatedFormula}`);
-        
-        // Vérifier si la formule est valide avant de l'évaluer
-        if (!/^[\d\s+\-*/().]+$/.test(evaluatedFormula)) {
-          console.log('Invalid formula characters detected');
-          return null;
-        }
-        
-        // Create a function that returns the evaluated formula
-        const evalFunc = new Function(`return ${evaluatedFormula}`);
-        const result = evalFunc();
-        
-        // Check if the result is a number
-        if (typeof result === 'number' && !isNaN(result)) {
-          console.log(`Formula result: ${result}`);
-          return result;
-        }
-      } catch (error) {
-        console.error('Error evaluating formula:', error);
       }
-      return null;
+      
+      // Si c'est une chaîne numérique
+      const numValue = parseFloat(cell.value);
+      return !isNaN(numValue) ? numValue : null;
     }
-    
-    // Si la cellule a une valeur directe
-    if (cell.value !== null && cell.value !== undefined) {
-      // Convert to number
-      const numValue = typeof cell.value === 'string' ? parseFloat(cell.value) : (cell.value as number);
-      if (!isNaN(numValue)) {
-        console.log(`Using direct value: ${numValue}`);
-        return numValue;
-      }
-    }
-    
-    console.log('No valid value found for cell');
+
     return null;
   }, []);
 
@@ -405,7 +376,7 @@ export const CamSpreadsheet: React.FC<CamSpreadsheetProps> = ({
   
   // Use a ref to store the debounced function
   const debouncedUpdateRef = useRef<(newData: SpreadsheetCell[][]) => void>(
-    debounce(async (newData: SpreadsheetCell[][]) => {
+    _.debounce(async (newData: SpreadsheetCell[][]) => {
       console.log("Debounced spreadsheet data update");
 
       if (!camProfile) return;
@@ -413,40 +384,72 @@ export const CamSpreadsheet: React.FC<CamSpreadsheetProps> = ({
       let profileChanged = false;
       const updatedProfile = { ...camProfile };
       const updatedSegments = [...updatedProfile.segments];
+      const processedLinks = new Set<string>(); // Pour éviter les mises à jour en double
 
-      // Parcourir toutes les cellules pour trouver celles qui sont liées
+      // Première passe : mettre à jour les segments liés aux cellules
       newData.forEach((row, rowIndex) => {
         row.forEach((cell, colIndex) => {
           if (cell && cell.linkedSegments) {
             cell.linkedSegments.forEach(link => {
               const segmentIndex = link.segmentIndex;
               const parameter = link.parameter;
-              const value = cell.calculatedValue !== undefined ? cell.calculatedValue : parseFloat(cell.value?.toString() || '0');
+              const linkKey = `${segmentIndex}-${parameter}`;
 
-              if (!isNaN(value)) {
-                // Mettre à jour le paramètre du segment
-                updatedSegments[segmentIndex] = {
-                  ...updatedSegments[segmentIndex],
-                  [parameter]: value
-                };
+              if (!processedLinks.has(linkKey)) {
+                processedLinks.add(linkKey);
+                
+                // Calculer la valeur à utiliser
+                const calculatedValue = getCalculatedCellValue(cell, newData);
+                const value = calculatedValue !== null ? calculatedValue : 
+                            (cell.calculatedValue !== undefined ? cell.calculatedValue : 
+                            parseFloat(cell.value?.toString() || '0'));
 
-                // Si c'est un paramètre de fin (x2, y2, v2, a2) et qu'il y a un segment suivant
-                if (['x2', 'y2', 'v2', 'a2'].includes(parameter) && segmentIndex < updatedSegments.length - 1) {
-                  // Mettre à jour le paramètre correspondant du segment suivant
-                  const nextSegmentIndex = segmentIndex + 1;
-                  const nextParameter = parameter.replace('2', '1'); // Convertir x2 en x1, y2 en y1, etc.
-                  
-                  updatedSegments[nextSegmentIndex] = {
-                    ...updatedSegments[nextSegmentIndex],
-                    [nextParameter]: value
+                if (!isNaN(value)) {
+                  // Mettre à jour le paramètre du segment
+                  updatedSegments[segmentIndex] = {
+                    ...updatedSegments[segmentIndex],
+                    [parameter]: value
                   };
+                  profileChanged = true;
                 }
-
-                profileChanged = true;
               }
             });
           }
         });
+      });
+
+      // Deuxième passe : propager les valeurs aux segments suivants
+      updatedSegments.forEach((segment, index) => {
+        if (index < updatedSegments.length - 1) {
+          const nextSegment = updatedSegments[index + 1];
+          
+          // Pour chaque paramètre de fin
+          ['x2', 'y2', 'v2', 'a2'].forEach(endParam => {
+            const startParam = endParam.replace('2', '1');
+            const nextSegmentIndex = index + 1;
+            
+            // Vérifier si le paramètre du segment suivant n'est pas lié à une cellule
+            const isNextParameterLinked = newData.some(row =>
+              row.some(cell =>
+                cell?.linkedSegments?.some(link =>
+                  link.segmentIndex === nextSegmentIndex && link.parameter === startParam
+                )
+              )
+            );
+
+            if (!isNextParameterLinked) {
+              // Copier la valeur du paramètre de fin vers le paramètre de début du segment suivant
+              const endValue = segment[endParam as keyof Segment];
+              if (typeof endValue === 'number') {
+                updatedSegments[nextSegmentIndex] = {
+                  ...nextSegment,
+                  [startParam]: endValue
+                };
+                profileChanged = true;
+              }
+            }
+          });
+        }
       });
 
       if (profileChanged) {
@@ -480,7 +483,7 @@ export const CamSpreadsheet: React.FC<CamSpreadsheetProps> = ({
 
   // Update the debounced function
   useEffect(() => {
-    debouncedUpdateRef.current = debounce(async (newData: SpreadsheetCell[][]) => {
+    debouncedUpdateRef.current = _.debounce(async (newData: SpreadsheetCell[][]) => {
       console.log("Debounced spreadsheet data update");
       
       if (camProfile) {
@@ -535,93 +538,98 @@ export const CamSpreadsheet: React.FC<CamSpreadsheetProps> = ({
   }, [camProfile, onProfileUpdate]);
 
   const handleDataChange = (newData: SpreadsheetCell[][]) => {
-    console.log("Spreadsheet data changed");
+    const updatedData = newData.map(row => [...row]);  // Créer une copie profonde des données
+    let profileNeedsUpdate = false;
+    let updatedSegments = camProfile ? [...camProfile.segments] : [];
     
-    // Create a copy of the data to work with
-    const updatedData = [...newData];
-    
-    // Vérifier les cellules modifiées et mettre à jour les segments immédiatement
-    if (camProfile) {
-      let updatedProfile = { ...camProfile };
-      let profileChanged = false;
+    // Fonction pour mettre à jour une cellule et ses dépendances
+    const updateCellAndDependencies = (row: number, col: number, processedCells = new Set<string>()) => {
+      const cellKey = `${row}-${col}`;
+      if (processedCells.has(cellKey)) return;
+      processedCells.add(cellKey);
 
-      // Première passe : calculer toutes les formules
-      updatedData.forEach((row, rowIndex) => {
-        row.forEach((cell, colIndex) => {
-          if (cell?.formula || (typeof cell?.value === 'string' && cell?.value.startsWith('='))) {
-            const calculatedValue = getCalculatedCellValue(cell, updatedData);
-            if (calculatedValue !== null) {
-              updatedData[rowIndex][colIndex] = {
-                ...cell,
-                calculatedValue: calculatedValue
+      const cell = updatedData[row][col];
+      if (!cell) return;
+
+      // Calculer la nouvelle valeur
+      const calculatedValue = getCalculatedCellValue(cell, updatedData);
+      if (calculatedValue !== null) {
+        cell.calculatedValue = calculatedValue;
+        console.log(`Cell [${row},${col}] calculated value: ${calculatedValue}`);
+        
+        // Si la cellule est liée à des paramètres de segment, les mettre à jour
+        if (cell.linkedSegments && cell.linkedSegments.length > 0 && camProfile) {
+          cell.linkedSegments.forEach(link => {
+            if (updatedSegments[link.segmentIndex]) {
+              updatedSegments[link.segmentIndex] = {
+                ...updatedSegments[link.segmentIndex],
+                [link.parameter]: calculatedValue
               };
+              profileNeedsUpdate = true;
+              console.log(`Updated segment ${link.segmentIndex} ${link.parameter} to ${calculatedValue}`);
+
+              // Propager aux segments suivants si nécessaire
+              if (['x2', 'y2', 'v2', 'a2'].includes(link.parameter) && 
+                  link.segmentIndex < updatedSegments.length - 1) {
+                const nextSegmentIndex = link.segmentIndex + 1;
+                const nextParameter = link.parameter.replace('2', '1');
+                
+                const isNextParameterLinked = updatedData.some(row =>
+                  row.some(cell =>
+                    cell?.linkedSegments?.some(link =>
+                      link.segmentIndex === nextSegmentIndex && link.parameter === nextParameter
+                    )
+                  )
+                );
+
+                if (!isNextParameterLinked) {
+                  console.log(`Propagating ${calculatedValue} to next segment ${nextSegmentIndex} ${nextParameter}`);
+                  updatedSegments[nextSegmentIndex] = {
+                    ...updatedSegments[nextSegmentIndex],
+                    [nextParameter]: calculatedValue
+                  };
+                  profileNeedsUpdate = true;
+                }
+              }
+            }
+          });
+        }
+      }
+
+      // Trouver et mettre à jour toutes les cellules qui dépendent de celle-ci
+      updatedData.forEach((rowData, rowIndex) => {
+        rowData.forEach((depCell, colIndex) => {
+          if (depCell?.value?.toString().startsWith('=')) {
+            const cellRef = `${String.fromCharCode(65 + col)}${row + 1}`;
+            if (depCell.value.toString().includes(cellRef)) {
+              updateCellAndDependencies(rowIndex, colIndex, processedCells);
             }
           }
         });
       });
+    };
 
-      // Deuxième passe : mettre à jour les segments liés
-      updatedData.forEach((row, rowIndex) => {
-        row.forEach((cell, colIndex) => {
-          // Ignorer les cellules qui n'ont pas de liens
-          if (!cell?.linkedSegments?.length) {
-            return;
-          }
-
-          // Obtenir la valeur à utiliser
-          let valueToUse: number | null = null;
-
-          // Si la cellule a une valeur calculée (formule ou valeur directe), l'utiliser
-          if (cell.calculatedValue !== undefined) {
-            valueToUse = cell.calculatedValue;
-          } else if (typeof cell.value === 'string' && !cell.value.startsWith('=')) {
-            // Si c'est une valeur directe
-            const directValue = parseFloat(cell.value);
-            valueToUse = !isNaN(directValue) ? directValue : null;
-          }
-
-          console.log(`Cell [${rowIndex}, ${colIndex}] value: ${cell.value}, calculatedValue: ${valueToUse}`);
-          
-          if (valueToUse !== null) {
-            // Mettre à jour chaque segment lié
-            cell.linkedSegments.forEach((link: CellLink) => {
-              if (updatedProfile.segments[link.segmentIndex]) {
-                console.log(`Updating segment ${link.segmentIndex} parameter ${link.parameter} to ${valueToUse}`);
-                
-                // Mettre à jour le paramètre du segment
-                updatedProfile.segments[link.segmentIndex] = {
-                  ...updatedProfile.segments[link.segmentIndex],
-                  [link.parameter]: valueToUse
-                };
-                
-                profileChanged = true;
-
-                // Si c'est un paramètre de fin (x2, y2, v2, a2), mettre à jour le paramètre de début du segment suivant
-                if (['x2', 'y2', 'v2', 'a2'].includes(link.parameter) && link.segmentIndex < updatedProfile.segments.length - 1) {
-                  const nextSegmentIndex = link.segmentIndex + 1;
-                  const nextParameter = link.parameter.replace('2', '1');
-                  updatedProfile.segments[nextSegmentIndex] = {
-                    ...updatedProfile.segments[nextSegmentIndex],
-                    [nextParameter]: valueToUse
-                  };
-                }
-              }
-            });
-          }
-        });
+    // Traiter chaque cellule modifiée
+    newData.forEach((row, rowIndex) => {
+      row.forEach((cell, colIndex) => {
+        if (!data[rowIndex] || !data[rowIndex][colIndex] || data[rowIndex][colIndex].value !== cell.value) {
+          console.log(`Processing changed cell [${rowIndex},${colIndex}]: ${cell.value}`);
+          updateCellAndDependencies(rowIndex, colIndex);
+        }
       });
-
-      if (profileChanged) {
-        console.log("Profile changed, updating immediately...");
-        const finalProfile = {
-          ...updatedProfile,
-          spreadsheetData: updatedData
-        };
-        onProfileUpdate(finalProfile);
-      }
-    }
+    });
 
     setData(updatedData);
+    
+    // Mettre à jour le profil si nécessaire
+    if (profileNeedsUpdate && camProfile) {
+      const updatedProfile = {
+        ...camProfile,
+        segments: updatedSegments,
+        spreadsheetData: updatedData
+      };
+      onProfileUpdate(updatedProfile);
+    }
   };
 
   const handleSaveSpreadsheet = async () => {
@@ -904,6 +912,26 @@ export const CamSpreadsheet: React.FC<CamSpreadsheetProps> = ({
     }
     return [];
   }, []);
+
+  const createEmptyCell = (): SpreadsheetCell => ({
+    value: '',
+    formula: '',
+    calculatedValue: undefined,
+    linkedSegments: []
+  });
+
+  const evaluateCellValue = (cell: SpreadsheetCell): number | null => {
+    if (!cell.value) return null;
+    
+    // Si c'est une formule
+    if (cell.value.toString().startsWith('=')) {
+      return cell.calculatedValue || null;
+    }
+    
+    // Si c'est une valeur numérique
+    const numValue = parseFloat(cell.value.toString());
+    return isNaN(numValue) ? null : numValue;
+  };
 
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
